@@ -1,0 +1,25 @@
+WHITESPACE = _{ " " | "\t" | NEWLINE }
+
+ident = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
+string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+number = @{ ASCII_DIGIT+ }
+
+literal = _{ number | string }
+atom = _{ ident | literal }
+
+call = { ident ~ "(" ~ call_args ~ ")" }
+call_args = { (expr ~ ("," ~ expr)*)? }
+
+expr = _{ atom | call }
+
+var_dec = { "var" ~ ident ~ "=" ~ expr }
+fun_dec = { "fun" ~ ident ~ "(" ~ fun_dec_args ~ ")" ~ "{" ~  block_body ~ "}" }
+fun_dec_args = { (ident ~ ("," ~ ident)*)? }
+
+ret = { "return" ~ expr }
+
+statement = _{ ((var_dec | call | ret) ~ ";") | fun_dec }
+
+block_body = { statement* }
+
+program = _{ SOI ~ statement* ~ EOI }
