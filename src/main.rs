@@ -3,7 +3,7 @@ extern crate pest;
 extern crate pest_derive;
 
 use pest::{
-    error::{Error, ErrorVariant},
+    error::{Error, ErrorVariant, LineColLocation},
     iterators::{Pair, Pairs},
     Parser,
 };
@@ -18,16 +18,60 @@ impl From<Error<Rule>> for ErrorTrace {
     }
 }
 
+impl std::fmt::Display for ErrorTrace {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "Deepest error first\n{}",
+            self.stack
+                .iter()
+                .map(|err| {
+                    format!(
+                        "--> {}\n{}\n |{}\n = {}\n",
+                        match err.line_col {
+                            LineColLocation::Pos((y, x)) => format!("{y}:{x}"),
+                            LineColLocation::Span((ys, xs), (ye, xe)) =>
+                                format!("{ys}:{xs} -> {ye}:{xe}"),
+                        },
+                        format_args!(
+                            " |\n{}| {}",
+                            match err.line_col {
+                                LineColLocation::Pos((y, _)) => y,
+                                LineColLocation::Span((ys, _), _) => ys,
+                            },
+                            err.line()
+                        ),
+                        match err.line_col {
+                            LineColLocation::Pos((_, x)) =>
+                                format!("{}^", (0..(x)).map(|_| " ").collect::<String>()),
+                            LineColLocation::Span((ys, xs), (ye, xe)) =>
+                                if ys == ye {
+                                    format!(
+                                        "{}^{}^",
+                                        (0..(xs)).map(|_| " ").collect::<String>(),
+                                        (0..(xe - xs - 1)).map(|_| "-").collect::<String>()
+                                    )
+                                } else {
+                                    format!(
+                                        "{}^{}",
+                                        (0..(xs)).map(|_| " ").collect::<String>(),
+                                        (0..(err.line().len() - xs))
+                                            .map(|_| "-")
+                                            .collect::<String>()
+                                    )
+                                },
+                        },
+                        err.variant.message()
+                    )
+                })
+                .collect::<String>(),
+        )
+    }
+}
+
 impl ErrorTrace {
     fn push(&mut self, err: Error<Rule>) {
         self.stack.push(err)
-    }
-
-    fn message(&self) -> String {
-        self.stack
-            .iter()
-            .map(|err| err.variant.message())
-            .collect::<String>()
     }
 }
 
@@ -54,15 +98,11 @@ enum Statement {
         args: Vec<String>,
         body: Vec<Statement>,
     },
-}
-
-#[derive(PartialEq, Debug, Clone)]
-enum AstNode {
     Expr(Expr),
-    Statement(Statement),
+    Return(Expr),
 }
 
-fn parse(source: &str) -> Result<Vec<AstNode>, ErrorTrace> {
+fn parse(source: &str) -> Result<Vec<Statement>, ErrorTrace> {
     let mut ast = vec![];
 
     let pairs: Pairs<Rule> = TParser::parse(Rule::program, source)?;
@@ -72,10 +112,8 @@ fn parse(source: &str) -> Result<Vec<AstNode>, ErrorTrace> {
 
     for pair in pairs {
         match pair.as_rule() {
-            Rule::fun_dec => {
-                let res = build_ast_from_statement(pair)?;
-                ast.push(AstNode::Statement(res));
-            }
+            Rule::fun_dec => ast.push(build_ast_from_statement(pair)?),
+            Rule::EOI => {}
             unknown_rule => Err(Error::new_from_span(
                 ErrorVariant::CustomError {
                     message: format!("Unknown rule: {:?}", unknown_rule),
@@ -117,6 +155,23 @@ where
     })
 }
 
+// Builds [Statement] from either statement or expr rules
+fn dispatch(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
+    match pair.as_rule() {
+        Rule::fun_dec | Rule::var_dec | Rule::ret => build_ast_from_statement(pair),
+        Rule::ident | Rule::string | Rule::number | Rule::call => {
+            Ok(Statement::Expr(build_ast_from_expr(pair)?))
+        }
+        unknown => Err(Error::new_from_span(
+            ErrorVariant::CustomError {
+                message: format!("Unknown rule {:?}", unknown),
+            },
+            pair.as_span(),
+        )
+        .into()),
+    }
+}
+
 fn build_ast_from_expr(pair: Pair<Rule>) -> Result<Expr, ErrorTrace> {
     match pair.as_rule() {
         Rule::ident => Ok(Expr::Ident(pair.as_str().to_owned())),
@@ -128,7 +183,6 @@ fn build_ast_from_expr(pair: Pair<Rule>) -> Result<Expr, ErrorTrace> {
                 .expect("Failed to parse number"),
         )),
         Rule::call => {
-            let span = pair.as_span();
             let mut children = pair.clone().into_inner();
             fields!(children |> name, args);
 
@@ -174,7 +228,7 @@ fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
 
             let body = body
                 .into_inner()
-                .map(|child| handle(&pair, child, build_ast_from_statement))
+                .map(|child| handle(&pair, child, dispatch))
                 .collect::<Result<Vec<Statement>, ErrorTrace>>()?;
 
             if let Ok(Expr::Ident(name)) = build_ast_from_expr(name.clone()) {
@@ -205,9 +259,18 @@ fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
             }
         }
 
+        Rule::ret => {
+            let mut children = pair.into_inner();
+            fields!(children |> expr);
+
+            let expr = build_ast_from_expr(expr)?;
+
+            Ok(Statement::Return(expr))
+        }
+
         unknown_expr => Err(Error::new_from_span(
             ErrorVariant::CustomError {
-                message: format!("Unexpected statement: {:?}", unknown_expr),
+                message: format!("unexpected statement: {:?}", unknown_expr),
             },
             pair.as_span(),
         )
@@ -252,7 +315,7 @@ fn main() {
     let unparsed_file =
         std::fs::read_to_string("examples/hello_world.tst").expect("cannot read tst file");
     match parse(&unparsed_file) {
-        Ok(ast) => println!("{:?}", ast),
-        Err(trace) => eprintln!("{}", trace.message()),
+        Ok(ast) => println!("{:#?}", ast),
+        Err(trace) => eprintln!("{}", trace),
     }
 }

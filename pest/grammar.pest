@@ -20,7 +20,7 @@ fun_dec_args = { (ident ~ ("," ~ ident)*)? }
 
 ret = { "return" ~ expr }
 
-statement = _{ ((var_dec | expr | ret) ~ ";") | fun_dec }
+statement = _{ ((var_dec | call | ret) ~ ";") | fun_dec }
 
 block_body = { statement* }
 
