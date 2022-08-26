@@ -1,10 +1,12 @@
 WHITESPACE = _{ " " | "\t" | NEWLINE }
 
 ident = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_")* }
-string = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
 number = @{ ASCII_DIGIT+ }
 
-literal = _{ number | string }
+string = { (!"\"" ~ ANY)* }
+quoted_string = _{ "\"" ~ string ~ "\"" }
+
+literal = _{ number | quoted_string }
 atom = _{ ident | literal }
 
 call = { ident ~ "(" ~ call_args ~ ")" }
@@ -18,7 +20,7 @@ fun_dec_args = { (ident ~ ("," ~ ident)*)? }
 
 ret = { "return" ~ expr }
 
-statement = _{ ((var_dec | call | ret) ~ ";") | fun_dec }
+statement = _{ ((var_dec | expr | ret) ~ ";") | fun_dec }
 
 block_body = { statement* }
 

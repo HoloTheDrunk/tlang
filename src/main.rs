@@ -1,14 +1,35 @@
-#![allow(unused)]
-
 extern crate pest;
 #[macro_use]
 extern crate pest_derive;
 
 use pest::{
-    error::Error,
+    error::{Error, ErrorVariant},
     iterators::{Pair, Pairs},
     Parser,
 };
+
+struct ErrorTrace {
+    stack: Vec<Error<Rule>>,
+}
+
+impl From<Error<Rule>> for ErrorTrace {
+    fn from(err: Error<Rule>) -> Self {
+        ErrorTrace { stack: vec![err] }
+    }
+}
+
+impl ErrorTrace {
+    fn push(&mut self, err: Error<Rule>) {
+        self.stack.push(err)
+    }
+
+    fn message(&self) -> String {
+        self.stack
+            .iter()
+            .map(|err| err.variant.message())
+            .collect::<String>()
+    }
+}
 
 #[derive(Parser)]
 #[grammar = "../pest/grammar.pest"]
@@ -31,7 +52,7 @@ enum Statement {
     FunDec {
         name: String,
         args: Vec<String>,
-        body: Vec<Expr>,
+        body: Vec<Statement>,
     },
 }
 
@@ -41,7 +62,7 @@ enum AstNode {
     Statement(Statement),
 }
 
-fn parse(source: &str) -> Result<Vec<AstNode>, Error<Rule>> {
+fn parse(source: &str) -> Result<Vec<AstNode>, ErrorTrace> {
     let mut ast = vec![];
 
     let pairs: Pairs<Rule> = TParser::parse(Rule::program, source)?;
@@ -52,9 +73,15 @@ fn parse(source: &str) -> Result<Vec<AstNode>, Error<Rule>> {
     for pair in pairs {
         match pair.as_rule() {
             Rule::fun_dec => {
-                ast.push(build_ast_from_fun_dec(pair));
+                let res = build_ast_from_statement(pair)?;
+                ast.push(AstNode::Statement(res));
             }
-            _ => {}
+            unknown_rule => Err(Error::new_from_span(
+                ErrorVariant::CustomError {
+                    message: format!("Unknown rule: {:?}", unknown_rule),
+                },
+                pair.as_span(),
+            ))?,
         }
     }
 
@@ -72,21 +99,28 @@ macro_rules! fields {
     };
 }
 
-fn build_ast_from_fun_dec(pair: Pair<Rule>) -> AstNode {
-    match pair.as_rule() {
-        Rule::fun_dec => {
-            let mut pair = pair.into_inner();
-            fields!(pair |> name, args);
-            let name = build_ast_from_expr(name);
-        }
-        unknown_expr => panic!("Expected function declaration, got: {:?}", unknown_expr),
-    }
+/// Pushes new error onto stacktrace or returns pred(pair).
+fn handle<F, T>(parent: &Pair<Rule>, pair: Pair<Rule>, pred: F) -> Result<T, ErrorTrace>
+where
+    F: FnOnce(Pair<Rule>) -> Result<T, ErrorTrace>,
+{
+    let (span, rule) = (parent.as_span(), parent.as_rule());
+    pred(pair).map_err(|mut trace| {
+        trace.push(Error::new_from_span(
+            ErrorVariant::ParsingError {
+                positives: vec![rule],
+                negatives: vec![],
+            },
+            span,
+        ));
+        trace
+    })
 }
 
-fn build_ast_from_expr(pair: Pair<Rule>) -> Result<Expr, Error<String>> {
+fn build_ast_from_expr(pair: Pair<Rule>) -> Result<Expr, ErrorTrace> {
     match pair.as_rule() {
-        Rule::ident => Ok(Expr::Ident(pair.as_span().as_str().to_owned())),
-        Rule::string => Ok(Expr::String(pair.as_span().as_str().to_owned())),
+        Rule::ident => Ok(Expr::Ident(pair.as_str().to_owned())),
+        Rule::string => Ok(Expr::String(pair.as_str().to_owned())),
         Rule::number => Ok(Expr::Number(
             pair.as_span()
                 .as_str()
@@ -94,35 +128,104 @@ fn build_ast_from_expr(pair: Pair<Rule>) -> Result<Expr, Error<String>> {
                 .expect("Failed to parse number"),
         )),
         Rule::call => {
-            let mut pair = pair.into_inner();
-            fields!(pair |> name, args);
+            let span = pair.as_span();
+            let mut children = pair.clone().into_inner();
+            fields!(children |> name, args);
 
             let args = args
                 .into_inner()
-                .map(|pair| build_ast_from_expr(pair).expect("Failed to parse call args"))
-                .collect();
+                .map(|child| handle(&pair, child, build_ast_from_expr))
+                .collect::<Result<Vec<Expr>, ErrorTrace>>()?;
 
-            if let Ok(Expr::Ident(name)) = build_ast_from_expr(name) {
+            if let Ok(Expr::Ident(name)) = build_ast_from_expr(name.clone()) {
                 Ok(Expr::Call { name, args })
             } else {
                 panic!("Expected identifier, got: {:?}", name);
             }
-        },
+        }
         unknown_expr => panic!("Unexpected expression: {:?}", unknown_expr),
     }
 }
 
-fn build_name_from_pair(pair: Pair<Rule>) -> Result<String, Error<String>> {
+fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
+    match pair.as_rule() {
+        Rule::fun_dec => {
+            let span = pair.as_span();
+            let mut children = pair.clone().into_inner();
+            fields!(children |> name, args, body);
 
+            let args = args
+                .into_inner()
+                .map(|pair| {
+                    if let Ok(Expr::Ident(arg)) = build_ast_from_expr(pair) {
+                        Ok(arg)
+                    } else {
+                        Err(Error::new_from_span(
+                            ErrorVariant::ParsingError {
+                                positives: vec![Rule::fun_dec],
+                                negatives: vec![],
+                            },
+                            span,
+                        )
+                        .into())
+                    }
+                })
+                .collect::<Result<Vec<String>, ErrorTrace>>()?;
+
+            let body = body
+                .into_inner()
+                .map(|child| handle(&pair, child, build_ast_from_statement))
+                .collect::<Result<Vec<Statement>, ErrorTrace>>()?;
+
+            if let Ok(Expr::Ident(name)) = build_ast_from_expr(name.clone()) {
+                Ok(Statement::FunDec { name, args, body })
+            } else {
+                panic!("Expected identifier, got: {:?}", name);
+            }
+        }
+
+        Rule::var_dec => {
+            let span = pair.as_span();
+            let mut children = pair.into_inner();
+            fields!(children |> name, expr);
+
+            let expr = build_ast_from_expr(expr)?;
+
+            if let Expr::Ident(name) = build_ast_from_expr(name.clone())? {
+                Ok(Statement::VarDec { name, expr })
+            } else {
+                Err(Error::new_from_span(
+                    ErrorVariant::ParsingError {
+                        positives: vec![Rule::var_dec, Rule::ident],
+                        negatives: vec![],
+                    },
+                    span,
+                )
+                .into())
+            }
+        }
+
+        unknown_expr => Err(Error::new_from_span(
+            ErrorVariant::CustomError {
+                message: format!("Unexpected statement: {:?}", unknown_expr),
+            },
+            pair.as_span(),
+        )
+        .into()),
+    }
 }
+
+/* fn build_name_from_pair(pair: Pair<Rule>) -> Result<String, Error<String>> {
+
+} */
 
 fn recursive_print(cur: Option<&Pair<Rule>>, depth: u8) {
     if let Some(node) = cur {
         let rule = node.as_rule();
-        let rule_space = (0..(format!("{rule:?}").len()
-            + if rule == Rule::fun_dec { 2 } else { 0 }))
-            .map(|_| " ")
-            .collect::<String>();
+        /* let rule_space = (0..(format!("{rule:?}").len()
+        + if rule == Rule::fun_dec { 2 } else { 0 }))
+        .map(|_| " ")
+        .collect::<String>(); */
 
         let indent = (0..depth)
             .map(|_| "\x1b[32m|   \x1b[0m")
@@ -148,5 +251,8 @@ fn recursive_print(cur: Option<&Pair<Rule>>, depth: u8) {
 fn main() {
     let unparsed_file =
         std::fs::read_to_string("examples/hello_world.tst").expect("cannot read tst file");
-    let astnode = parse(&unparsed_file).expect("unsuccessful parse");
+    match parse(&unparsed_file) {
+        Ok(ast) => println!("{:?}", ast),
+        Err(trace) => eprintln!("{}", trace.message()),
+    }
 }
