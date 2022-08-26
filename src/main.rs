@@ -8,6 +8,7 @@ use pest::{
     Parser,
 };
 
+#[derive(Debug)]
 struct ErrorTrace {
     stack: Vec<Error<Rule>>,
 }
@@ -28,11 +29,13 @@ impl std::fmt::Display for ErrorTrace {
                 .map(|err| {
                     format!(
                         "--> {}\n{}\n |{}\n = {}\n",
+                        // Error coordinates
                         match err.line_col {
                             LineColLocation::Pos((y, x)) => format!("{y}:{x}"),
                             LineColLocation::Span((ys, xs), (ye, xe)) =>
                                 format!("{ys}:{xs} -> {ye}:{xe}"),
                         },
+                        // Line number and line
                         format_args!(
                             " |\n{}| {}",
                             match err.line_col {
@@ -41,6 +44,7 @@ impl std::fmt::Display for ErrorTrace {
                             },
                             err.line()
                         ),
+                        // Underline
                         match err.line_col {
                             LineColLocation::Pos((_, x)) =>
                                 format!("{}^", (0..(x)).map(|_| " ").collect::<String>()),
@@ -61,6 +65,7 @@ impl std::fmt::Display for ErrorTrace {
                                     )
                                 },
                         },
+                        // Error
                         err.variant.message()
                     )
                 })
@@ -231,10 +236,22 @@ fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
                 .map(|child| handle(&pair, child, dispatch))
                 .collect::<Result<Vec<Statement>, ErrorTrace>>()?;
 
-            if let Ok(Expr::Ident(name)) = build_ast_from_expr(name.clone()) {
-                Ok(Statement::FunDec { name, args, body })
-            } else {
-                panic!("Expected identifier, got: {:?}", name);
+            match build_ast_from_expr(name.clone()) {
+                Ok(Expr::Ident(name)) => Ok(Statement::FunDec { name, args, body }),
+                Ok(_) => (),
+                Err(trace) => {
+                    trace.push(
+                        Error::new_from_span(
+                            ErrorVariant::ParsingError {
+                                positives: vec![Rule::fun_dec],
+                                negatives: vec![],
+                            },
+                            span,
+                        )
+                        .into(),
+                    );
+                    trace
+                }
             }
         }
 
@@ -278,17 +295,9 @@ fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
     }
 }
 
-/* fn build_name_from_pair(pair: Pair<Rule>) -> Result<String, Error<String>> {
-
-} */
-
 fn recursive_print(cur: Option<&Pair<Rule>>, depth: u8) {
     if let Some(node) = cur {
         let rule = node.as_rule();
-        /* let rule_space = (0..(format!("{rule:?}").len()
-        + if rule == Rule::fun_dec { 2 } else { 0 }))
-        .map(|_| " ")
-        .collect::<String>(); */
 
         let indent = (0..depth)
             .map(|_| "\x1b[32m|   \x1b[0m")
@@ -302,7 +311,7 @@ fn recursive_print(cur: Option<&Pair<Rule>>, depth: u8) {
                 .as_str()
                 .lines()
                 .map(|line| line.trim())
-                .collect::<String>() // .replace('\n', format!("\n{indent}{rule_space}").as_ref()),
+                .collect::<String>()
         );
 
         for pair in node.clone().into_inner() {
