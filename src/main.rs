@@ -238,20 +238,23 @@ fn build_ast_from_statement(pair: Pair<Rule>) -> Result<Statement, ErrorTrace> {
 
             match build_ast_from_expr(name.clone()) {
                 Ok(Expr::Ident(name)) => Ok(Statement::FunDec { name, args, body }),
-                Ok(_) => (),
-                Err(trace) => {
-                    trace.push(
-                        Error::new_from_span(
-                            ErrorVariant::ParsingError {
-                                positives: vec![Rule::fun_dec],
-                                negatives: vec![],
-                            },
-                            span,
-                        )
-                        .into(),
-                    );
+                Ok(_) => Err(ErrorTrace::from(Error::new_from_span(
+                    ErrorVariant::ParsingError {
+                        positives: vec![Rule::fun_dec],
+                        negatives: vec![],
+                    },
+                    span,
+                ))),
+                Err(mut trace) => Err({
+                    trace.push(Error::new_from_span(
+                        ErrorVariant::ParsingError {
+                            positives: vec![Rule::fun_dec],
+                            negatives: vec![],
+                        },
+                        span,
+                    ));
                     trace
-                }
+                }),
             }
         }
 
